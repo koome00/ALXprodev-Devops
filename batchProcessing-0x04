@@ -1,0 +1,185 @@
+#!/bin/bash
+
+# Configuration
+API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
+MAX_PARALLEL=3      # Maximum number of parallel processes
+MAX_RETRIES=3       # Maximum retry attempts per Pokémon
+DELAY_SECONDS=1     # Base delay between retries
+TIMEOUT_SECONDS=10  # Curl timeout
+
+# Pokemon list
+POKEMON_LIST=(
+    "bulbasaur"
+    "ivysaur"
+    "venusaur"
+    "charmander"
+    "charmeleon"
+)
+
+# Create logs directory
+LOGS_DIR="fetch_logs"
+mkdir -p "$LOGS_DIR"
+ERROR_LOG="$LOGS_DIR/errors.log"
+> "$ERROR_LOG"
+
+# Function to fetch a single Pokémon with retries
+fetch_pokemon() {
+    local pokemon="$1"
+    local process_id="$2"
+    local log_file="$LOGS_DIR/${pokemon}_process.log"
+    local retry_count=0
+    local success=false
+    
+    # Log start of process
+    echo "[Process $process_id] Starting fetch for $pokemon" > "$log_file"
+    
+    while [ $retry_count -lt $MAX_RETRIES ] && [ "$success" = false ]; do
+        retry_count=$((retry_count + 1))
+        
+        echo "[Process $process_id] Attempt $retry_count for $pokemon" >> "$log_file"
+        
+        # Make API request
+        response=$(curl -s -w "\n%{http_code}" \
+                       --connect-timeout $TIMEOUT_SECONDS \
+                       --max-time $TIMEOUT_SECONDS \
+                       "$API_BASE_URL/$pokemon" 2>&1)
+        
+        # Check curl exit status
+        if [ $? -ne 0 ]; then
+            echo "[Process $process_id] CURL Error: $response" >> "$log_file"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] $pokemon: CURL Error (Attempt $retry_count)" >> "$ERROR_LOG"
+            sleep $((DELAY_SECONDS * retry_count))
+            continue
+        }
+        
+        # Extract status code and body
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | sed '$d')
+        
+        case $http_code in
+            200)
+                if echo "$body" | jq empty > /dev/null 2>&1; then
+                    echo "$body" | jq '.' > "${pokemon}.json"
+                    echo "[Process $process_id] Successfully saved data for $pokemon" >> "$log_file"
+                    success=true
+                    break
+                else
+                    echo "[Process $process_id] Invalid JSON received for $pokemon" >> "$log_file"
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $pokemon: Invalid JSON (Attempt $retry_count)" >> "$ERROR_LOG"
+                fi
+                ;;
+            404)
+                echo "[Process $process_id] Pokemon $pokemon not found" >> "$log_file"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] $pokemon: Not found (404)" >> "$ERROR_LOG"
+                break
+                ;;
+            429)
+                echo "[Process $process_id] Rate limit hit for $pokemon" >> "$log_file"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] $pokemon: Rate limited (429)" >> "$ERROR_LOG"
+                sleep $((DELAY_SECONDS * retry_count * 2))
+                ;;
+            *)
+                echo "[Process $process_id] HTTP $http_code for $pokemon" >> "$log_file"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] $pokemon: HTTP $http_code" >> "$ERROR_LOG"
+                sleep $((DELAY_SECONDS * retry_count))
+                ;;
+        esac
+    done
+    
+    # Indicate process completion in a status file
+    if [ "$success" = true ]; then
+        echo "success" > "$LOGS_DIR/${pokemon}_status"
+    else
+        echo "failed" > "$LOGS_DIR/${pokemon}_status"
+    fi
+}
+
+# Function to monitor progress
+monitor_progress() {
+    local total=$1
+    local completed=0
+    local status_line=""
+    
+    while [ $completed -lt $total ]; do
+        completed=0
+        status_line="Progress: "
+        
+        for pokemon in "${POKEMON_LIST[@]}"; do
+            if [ -f "$LOGS_DIR/${pokemon}_status" ]; then
+                status=$(cat "$LOGS_DIR/${pokemon}_status")
+                if [ "$status" = "success" ]; then
+                    status_line+="✓"
+                    ((completed++))
+                elif [ "$status" = "failed" ]; then
+                    status_line+="✗"
+                    ((completed++))
+                fi
+            else
+                status_line+="○"
+            fi
+        done
+        
+        echo -ne "\r$status_line [$completed/$total]"
+        sleep 0.5
+    done
+    echo # New line after progress complete
+}
+
+# Main execution
+echo "Starting parallel Pokemon data fetch..."
+echo "Maximum parallel processes: $MAX_PARALLEL"
+echo "Maximum retries per Pokemon: $MAX_RETRIES"
+
+# Start progress monitoring in background
+monitor_progress ${#POKEMON_LIST[@]} &
+MONITOR_PID=$!
+
+# Process Pokemon in parallel with controlled concurrency
+active_processes=0
+for i in "${!POKEMON_LIST[@]}"; do
+    pokemon="${POKEMON_LIST[$i]}"
+    
+    # Wait if we've reached max parallel processes
+    while [ $active_processes -ge $MAX_PARALLEL ]; do
+        active_processes=$(jobs -p | wc -l)
+        sleep 0.1
+    done
+    
+    # Start new fetch process
+    fetch_pokemon "$pokemon" $((i + 1)) &
+    active_processes=$(jobs -p | wc -l)
+done
+
+# Wait for all processes to complete
+wait
+
+# Kill progress monitor
+kill $MONITOR_PID 2>/dev/null
+
+# Generate final report
+echo -e "\n\nFetch process completed!"
+echo "----------------------------------------"
+successful=0
+failed=0
+
+for pokemon in "${POKEMON_LIST[@]}"; do
+    if [ -f "$LOGS_DIR/${pokemon}_status" ]; then
+        status=$(cat "$LOGS_DIR/${pokemon}_status")
+        if [ "$status" = "success" ]; then
+            ((successful++))
+        else
+            ((failed++))
+        fi
+    else
+        ((failed++))
+    fi
+done
+
+echo "Total Pokemon: ${#POKEMON_LIST[@]}"
+echo "Successful: $successful"
+echo "Failed: $failed"
+
+if [ -s "$ERROR_LOG" ]; then
+    echo -e "\nErrors encountered:"
+    cat "$ERROR_LOG"
+fi

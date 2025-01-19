@@ -1,0 +1,152 @@
+#!/bin/bash
+
+# Configuration
+API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
+ERROR_LOG="fetch_errors.log"
+DELAY_SECONDS=1  # Delay between requests
+MAX_RETRIES=3    # Maximum number of retry attempts
+TIMEOUT_SECONDS=10  # Curl timeout in seconds
+
+# Array of Pokémon to fetch
+POKEMON_LIST=(
+    "bulbasaur"
+    "ivysaur"
+    "venusaur"
+    "charmander"
+    "charmeleon"
+)
+
+# Create/clear error log
+> "$ERROR_LOG"
+
+# Function to log errors with timestamp
+log_error() {
+    local pokemon="$1"
+    local error_msg="$2"
+    local attempt="$3"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $pokemon (Attempt $attempt): $error_msg" >> "$ERROR_LOG"
+}
+
+# Function to safely convert Pokémon name to lowercase for filename
+sanitize_filename() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]._-'
+}
+
+# Function to make API request with retry logic
+make_api_request() {
+    local pokemon="$1"
+    local url="$API_BASE_URL/$pokemon"
+    local retry_count=0
+    local success=false
+    
+    while [ $retry_count -lt $MAX_RETRIES ] && [ "$success" = false ]; do
+        retry_count=$((retry_count + 1))
+        
+        echo "Attempt $retry_count of $MAX_RETRIES for $pokemon..."
+        
+        # Make API request with timeout and error handling
+        response=$(curl -s -w "\n%{http_code}" \
+                       --connect-timeout $TIMEOUT_SECONDS \
+                       --max-time $TIMEOUT_SECONDS \
+                       "$url" 2>&1)
+        
+        # Check if curl failed completely (network error, timeout, etc.)
+        if [ $? -ne 0 ]; then
+            log_error "$pokemon" "CURL Error: $response" "$retry_count"
+            echo "✗ Network error occurred"
+            sleep $((DELAY_SECONDS * retry_count))  # Exponential backoff
+            continue
+        }
+        
+        # Get status code (last line) and body (everything except last line)
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | sed '$d')
+        Objective: Create a report that summarizes data for multiple Pokémon.
+
+Instructions:
+
+Write a shell script that reads all the JSON files generated in Task 3 and extracts the name, height, and weight of each Pokémon.
+
+Generate a CSV file containing the Pokémon’s name, height, and weight.
+
+Use awk to calculate the average height and weight of all Pokémon in the report.
+        case $http_code in
+            200)
+                # Validate JSON response
+                if echo "$body" | jq empty > /dev/null 2>&1; then
+                    echo "$body" | jq '.' > "$(sanitize_filename "$pokemon").json"
+                    echo "✓ Successfully saved data for $pokemon"
+                    success=true
+                    break
+                else
+                    log_error "$pokemon" "Invalid JSON response" "$retry_count"
+                    echo "✗ Invalid JSON response received"
+                fi
+                ;;
+            404)
+                log_error "$pokemon" "Pokémon not found (404)" "$retry_count"
+                echo "✗ Error: Pokémon not found"
+                break  # Don't retry for 404 errors
+                ;;
+            429)
+                log_error "$pokemon" "Rate limit exceeded (429)" "$retry_count"
+                echo "✗ Rate limit exceeded, increasing delay..."
+                DELAY_SECONDS=$((DELAY_SECONDS * 2))  # Double the delay
+                sleep $((DELAY_SECONDS * retry_count))  # Exponential backoff
+                ;;
+            5*)
+                log_error "$pokemon" "Server error $http_code" "$retry_count"
+                echo "✗ Server error occurred"
+                sleep $((DELAY_SECONDS * retry_count))  # Exponential backoff
+                ;;
+            *)
+                log_error "$pokemon" "Unexpected HTTP error $http_code" "$retry_count"
+                echo "✗ Unexpected error occurred"
+                sleep $((DELAY_SECONDS * retry_count))  # Exponential backoff
+                ;;
+        esac
+    done
+    
+    if [ "$success" = false ]; then
+        echo "Failed to fetch data for $pokemon after $MAX_RETRIES attempts"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Main execution
+echo "Starting Pokémon data fetch with retry logic..."
+echo "Maximum retries: $MAX_RETRIES"
+echo "Initial delay between requests: ${DELAY_SECONDS}s"
+echo "Request timeout: ${TIMEOUT_SECONDS}s"
+echo "----------------------------------------"
+
+successful_fetches=0
+failed_fetches=0
+
+for pokemon in "${POKEMON_LIST[@]}"; do
+    if make_api_request "$pokemon"; then
+        successful_fetches=$((successful_fetches + 1))
+    else
+        failed_fetches=$((failed_fetches + 1))
+    fi
+    
+    # Only delay if this isn't the last Pokémon
+    if [ ! "$pokemon" = "${POKEMON_LIST[-1]}" ]; then
+        echo "Waiting ${DELAY_SECONDS}s before next request..."
+        sleep "$DELAY_SECONDS"
+    fi
+done
+
+# Final status report
+echo -e "\nFetch process completed!"
+echo "----------------------------------------"
+echo "Total Pokémon processed: ${#POKEMON_LIST[@]}"
+echo "Successful fetches: $successful_fetches"
+echo "Failed fetches: $failed_fetches"
+
+if [ -s "$ERROR_LOG" ]; then
+    echo -e "\nErrors encountered:"
+    cat "$ERROR_LOG"
+fi

@@ -1,0 +1,85 @@
+#!/bin/bash
+
+# Configuration
+OUTPUT_CSV="pokemon_stats.csv"
+STATS_REPORT="pokemon_analysis.txt"
+
+# Create CSV header
+echo "Name,Height(m),Weight(kg)" > "$OUTPUT_CSV"
+
+# Function to convert height from decimeters to meters and weight from hectograms to kilograms
+process_pokemon_file() {
+    local file="$1"
+    local name=$(jq -r '.name' "$file" | sed 's/.*/\u&/')
+    local height=$(jq -r '.height / 10' "$file")
+    local weight=$(jq -r '.weight / 10' "$file")
+    echo "$name,$height,$weight" >> "$OUTPUT_CSV"
+}
+
+# Process all JSON files
+echo "Processing Pokémon data files..."
+for file in *.json; do
+    if [ -f "$file" ]; then
+        echo "Processing $file..."
+        process_pokemon_file "$file"
+    fi
+done
+
+# Calculate statistics using awk
+echo "Calculating statistics..."
+awk -F',' '
+    BEGIN {
+        print "Pokémon Statistics Report\n" > "'$STATS_REPORT'"
+        print "Generated on " strftime("%Y-%m-%d %H:%M:%S") "\n" > "'$STATS_REPORT'"
+    }
+    NR == 1 { next }  # Skip header row
+    {
+        sum_height += $2
+        sum_weight += $3
+        count++
+        
+        # Track min and max values
+        if (NR == 2 || $2 < min_height) min_height = $2
+        if (NR == 2 || $2 > max_height) {
+            max_height = $2
+            tallest = $1
+        }
+        if (NR == 2 || $3 < min_weight) min_weight = $3
+        if (NR == 2 || $3 > max_weight) {
+            max_weight = $3
+            heaviest = $1
+        }
+    }
+    END {
+        if (count > 0) {
+            avg_height = sum_height / count
+            avg_weight = sum_weight / count
+            
+            printf "Total Pokémon analyzed: %d\n\n", count > "'$STATS_REPORT'"
+            
+            printf "Height Statistics:\n" > "'$STATS_REPORT'"
+            printf "  Average: %.2f m\n", avg_height > "'$STATS_REPORT'"
+            printf "  Minimum: %.2f m\n", min_height > "'$STATS_REPORT'"
+            printf "  Maximum: %.2f m (%s)\n\n", max_height, tallest > "'$STATS_REPORT'"
+            
+            printf "Weight Statistics:\n" > "'$STATS_REPORT'"
+            printf "  Average: %.2f kg\n", avg_weight > "'$STATS_REPORT'"
+            printf "  Minimum: %.2f kg\n", min_weight > "'$STATS_REPORT'"
+            printf "  Maximum: %.2f kg (%s)\n", max_weight, heaviest > "'$STATS_REPORT'"
+        } else {
+            print "No data found to analyze." > "'$STATS_REPORT'"
+        }
+    }
+' "$OUTPUT_CSV"
+
+# Check if files were created successfully
+if [ -f "$OUTPUT_CSV" ] && [ -f "$STATS_REPORT" ]; then
+    echo -e "\nReport generation completed successfully!"
+    echo "CSV data saved to: $OUTPUT_CSV"
+    echo "Statistics report saved to: $STATS_REPORT"
+    echo -e "\nStatistics Summary:"
+    cat "$STATS_REPORT"
+else
+    echo "Error: Report generation failed!"
+    exit 1
+fi

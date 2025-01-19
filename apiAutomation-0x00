@@ -1,0 +1,28 @@
+#!/bin/bash
+
+POKEMON="pikachu"
+API_URL="https://pokeapi.co/api/v2/pokemon/${POKEMON}/"
+OUTPUT_FILE="data.json"
+ERROR_FILE="errors.txt"
+
+# create error file if it doesn't exist
+if [ ! -f $ERROR_FILE ]; then
+  touch $ERROR_FILE
+fi
+
+log_error(){
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> $ERROR_FILE
+}
+
+echo "Fetching data from $API_URL for $POKEMON...."
+response=$(curl -s -w "\n%{http_code}" "$API_URL")
+
+http_code=$(echo "$response" | tail -n1)
+data=$(echo "$response" | sed '$d')
+
+if [ "$http_code" -eq 200 ]; then
+  echo "Data fetched successfully!"
+  echo "$data" > $OUTPUT_FILE
+else
+  log_error "Failed to fetch data. HTTP code: $http_code"
+fi
